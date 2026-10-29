@@ -3,6 +3,7 @@ package com.example.gallio.presentation
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -19,12 +20,16 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,19 +46,37 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // ───────── 앱 시작 지점 ─────────
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { SafeRecordScreen() }
+        setContent {
+            // 화면 3개: 메인 / 녹음 목록 / 녹음 하나 자세히
+            var screen by remember { mutableStateOf("main") }
+            var selected by remember { mutableStateOf<String?>(null) }
+            when (screen) {
+                "list" -> RecordingListScreen(
+                    onBack = { screen = "main" },
+                    onOpen = { selected = it; screen = "detail" }
+                )
+                "detail" -> RecordingDetailScreen(
+                    name = selected ?: "",
+                    onBack = { screen = "list" }
+                )
+                else -> SafeRecordScreen(onOpenList = { screen = "list" })
+            }
+        }
     }
 }
 
 // ───────── 화면 ─────────
 // 실제 감지·녹음은 RecordingService 가 뒤에서 하고, 화면은 그 상태를 보여주기만 함
 @Composable
-fun SafeRecordScreen() {
+fun SafeRecordScreen(onOpenList: () -> Unit) {
     val context = LocalContext.current
     val running by AudioState.running.collectAsState()
     val status by AudioState.status.collectAsState()
@@ -115,6 +138,8 @@ fun SafeRecordScreen() {
     // 실험용 숫자 (지금 값 / 기준값)
     val detailText = when {
         !running -> " "
+        inStage2 && status.aiLabel.isNotEmpty() ->
+            "%.0f dB · %s · 고함 %d%%".format(status.db, status.aiLabel, (status.aiShout * 100).toInt())
         inStage2 -> "%.0f dB  (주변 %.0f)".format(status.db, status.ambientDb)
         else -> "흔들림 %.1f / %.1f".format(status.motion, MOTION_LIMIT)
     }
@@ -195,6 +220,14 @@ fun SafeRecordScreen() {
             style = TextStyle(color = Color(0xFFBDBDBD), fontSize = 11.sp)
         )
 
+        // 2단계일 때 단어 인식 상태 (켜짐 / 들린 말 / 미지원)
+        if (inStage2 && status.keywordInfo.isNotEmpty()) {
+            BasicText(
+                text = status.keywordInfo,
+                style = TextStyle(color = Color(0xFFFFCC80), fontSize = 10.sp)
+            )
+        }
+
         BasicText(
             text = "$hrText  ·  녹음 ${status.savedCount}개",
             style = TextStyle(color = Color(0xFF9E9E9E), fontSize = 11.sp)
@@ -217,5 +250,184 @@ fun SafeRecordScreen() {
                 style = TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             )
         }
+
+        Spacer(Modifier.height(4.dp))
+
+        // 녹음 목록 보기
+        BasicText(
+            text = "녹음 목록 ›",
+            style = TextStyle(color = Color(0xFF90CAF9), fontSize = 12.sp),
+            modifier = Modifier.clickable { onOpenList() }.padding(4.dp)
+        )
     }
 }
+
+// ───────── 녹음 목록 화면 ─────────
+@Composable
+fun RecordingListScreen(onBack: () -> Unit, onOpen: (String) -> Unit) {
+    val context = LocalContext.current
+    val status by AudioState.status.collectAsState()
+    // 녹음 개수가 바뀌면 목록 다시 읽기
+    val recordings = remember(status.savedCount) { RecordingStore.list(context) }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(Color.Black),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 36.dp, bottom = 36.dp)
+    ) {
+        item {
+            BasicText(
+                text = "‹ 녹음 ${recordings.size}개",
+                style = TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold),
+                modifier = Modifier.clickable { onBack() }.padding(8.dp)
+            )
+        }
+        if (recordings.isEmpty()) {
+            item {
+                BasicText(
+                    text = "아직 녹음이 없어요",
+                    style = TextStyle(color = Color(0xFF9E9E9E), fontSize = 12.sp)
+                )
+            }
+        }
+        items(recordings) { r ->
+            Column(
+                modifier = Modifier
+                    .padding(vertical = 3.dp)
+                    .width(170.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF212121))
+                    .clickable { onOpen(r.name) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                BasicText(
+                    text = (if (r.keep) "★ " else "") + formatTime(r.start),
+                    style = TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                )
+                BasicText(
+                    text = "${r.trigger} · ${r.durationSec}초",
+                    style = TextStyle(color = Color(0xFFBDBDBD), fontSize = 11.sp)
+                )
+            }
+        }
+    }
+}
+
+// ───────── 녹음 하나 자세히 (재생 / 보관 / 삭제 + 증거 정보) ─────────
+@Composable
+fun RecordingDetailScreen(name: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+    var info by remember(name) { mutableStateOf(RecordingStore.load(context, name)) }
+    var playing by remember { mutableStateOf(false) }
+    var verify by remember { mutableStateOf<String?>(null) }
+    var askDelete by remember { mutableStateOf(false) }
+    val player = remember { arrayOfNulls<MediaPlayer>(1) }
+
+    fun stopPlay() {
+        player[0]?.release()
+        player[0] = null
+        playing = false
+    }
+
+    // 화면을 나가면 재생 멈춤
+    DisposableEffect(name) { onDispose { stopPlay() } }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().background(Color.Black),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 36.dp, bottom = 40.dp)
+    ) {
+        item {
+            BasicText(
+                text = "‹ " + formatTime(info.start),
+                style = TextStyle(color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold),
+                modifier = Modifier.clickable { onBack() }.padding(6.dp)
+            )
+        }
+        item {
+            BasicText(
+                text = "${info.trigger} · ${info.durationSec}초\n" +
+                        "최대 %.0f dB · 심박 %s".format(info.maxDb, if (info.heartRate > 0) "${info.heartRate}" else "--"),
+                style = TextStyle(color = Color(0xFFBDBDBD), fontSize = 11.sp, textAlign = TextAlign.Center)
+            )
+        }
+        item { Spacer(Modifier.height(6.dp)) }
+        item {
+            DetailButton(if (playing) "■ 정지" else "▶ 재생", Color(0xFF1565C0)) {
+                if (playing) stopPlay()
+                else {
+                    try {
+                        val mp = MediaPlayer()
+                        mp.setDataSource(RecordingStore.wav(context, name).absolutePath)
+                        mp.setOnCompletionListener { stopPlay() }
+                        mp.prepare()
+                        mp.start()
+                        player[0] = mp
+                        playing = true
+                    } catch (e: Exception) {
+                        stopPlay()
+                    }
+                }
+            }
+        }
+        item {
+            DetailButton(if (info.keep) "★ 보관 해제" else "☆ 보관 (자동 삭제 안 함)", Color(0xFF6A5300)) {
+                RecordingStore.setKeep(context, name, !info.keep)
+                info = RecordingStore.load(context, name)
+            }
+        }
+        item {
+            DetailButton("원본 확인", Color(0xFF2E7D32)) {
+                // 저장해둔 지문과 지금 다시 계산한 지문이 같으면 편집 안 된 원본
+                verify = when {
+                    info.sha256.isEmpty() -> "지문 정보 없음 (예전 녹음)"
+                    RecordingStore.sha256(RecordingStore.wav(context, name)) == info.sha256 -> "✓ 원본 그대로예요"
+                    else -> "✗ 파일이 바뀌었어요"
+                }
+            }
+        }
+        verify?.let {
+            item {
+                BasicText(
+                    text = it,
+                    style = TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                )
+            }
+        }
+        item {
+            DetailButton(if (askDelete) "한 번 더 누르면 삭제" else "삭제", Color(0xFF8E2424)) {
+                if (askDelete) {
+                    stopPlay()
+                    RecordingStore.delete(context, name)
+                    AudioState.status.value = AudioState.status.value.copy(savedCount = RecordingStore.count(context))
+                    onBack()
+                } else askDelete = true
+            }
+        }
+        item {
+            BasicText(
+                text = "지문 " + info.sha256.take(16),
+                style = TextStyle(color = Color(0xFF616161), fontSize = 9.sp)
+            )
+        }
+    }
+}
+
+@Composable
+fun DetailButton(text: String, color: Color, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .padding(vertical = 3.dp)
+            .width(160.dp)
+            .height(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(color)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        BasicText(text = text, style = TextStyle(color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold))
+    }
+}
+
+fun formatTime(millis: Long): String =
+    SimpleDateFormat("M/d HH:mm:ss", Locale.KOREA).format(Date(millis))

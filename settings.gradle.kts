@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Gallio"
 include(":app")
+include(":mobile")

@@ -31,6 +31,9 @@ android {
         targetCompatibility = JavaVersion.VERSION_11
     }
     useLibrary("wear-sdk")
+    androidResources {
+        noCompress += "tflite"
+    }
     buildFeatures {
         compose = true
     }
@@ -52,4 +55,5 @@ dependencies {
     androidTestImplementation(libs.ui.test.junit4)
     debugImplementation(libs.ui.test.manifest)
     debugImplementation(libs.ui.tooling)
+    implementation("com.google.mediapipe:tasks-audio:latest.release")
 }
