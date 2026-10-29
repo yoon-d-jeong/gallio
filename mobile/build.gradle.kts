@@ -10,7 +10,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.mobile"
+        applicationId = "com.example.gallio"
         minSdk = 33
         targetSdk = 37
         versionCode = 1
@@ -45,6 +45,7 @@ dependencies {
     implementation(libs.ui)
     implementation(libs.ui.graphics)
     implementation(libs.ui.tooling.preview)
+    implementation("com.google.android.gms:play-services-wearable:18.0.0")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.espresso.core)

@@ -435,8 +435,9 @@ suspend fun listenWindow(context: Context, startRecordingNow: Boolean, stageReas
     var aiShout = 0f
     var chunkIndex = 0
 
-    // 단어 인식 (욕설·이름). 기기가 지원 안 하면 알아서 꺼진 채로 있음
-    val spotter = KeywordSpotter(context)
+    // 단어 인식 (욕설·이름): 워치가 한국어를 알아들으면 워치에서, 아니면 폰에게 맡김
+    val spotter: WordListener =
+        if (KeywordSpotter.supported(context)) KeywordSpotter(context) else PhoneKeywordSpotter(context)
     withContext(Dispatchers.Main) { spotter.start() }
 
     val preBuffer = ArrayDeque<ShortArray>()   // 최근 몇 초 소리를 계속 들고 있는 "링 버퍼"
@@ -536,6 +537,7 @@ suspend fun listenWindow(context: Context, startRecordingNow: Boolean, stageReas
                     pendingManual = false
                     spotter.clearHeard()
                     vibrate(context)
+                    PhoneLink.sendAlert(context, active!!.trigger)   // 폰에 "녹음 시작" 알림
                 } else if (idleChunks >= MIC_WINDOW_SECONDS * 10) {
                     break   // 고함 없이 시간이 다 됨 → 마이크 끄고 1단계로
                 }

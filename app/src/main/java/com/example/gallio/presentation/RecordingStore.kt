@@ -93,19 +93,18 @@ object RecordingStore {
     fun finish(context: Context, rec: ActiveRecording) {
         rec.writer.close()
         val file = wav(context, rec.name)
-        save(
-            context,
-            RecordingInfo(
-                name = rec.name,
-                start = rec.start,
-                durationSec = durationOf(file),
-                trigger = rec.trigger,
-                maxDb = rec.maxDb,
-                heartRate = rec.heartRate,
-                sha256 = sha256(file),
-                keep = false
-            )
+        val info = RecordingInfo(
+            name = rec.name,
+            start = rec.start,
+            durationSec = durationOf(file),
+            trigger = rec.trigger,
+            maxDb = rec.maxDb,
+            heartRate = rec.heartRate,
+            sha256 = sha256(file),
+            keep = false
         )
+        save(context, info)
+        PhoneLink.backup(context, info)   // 폰으로 자동 백업
     }
 
     fun setKeep(context: Context, name: String, keep: Boolean) {

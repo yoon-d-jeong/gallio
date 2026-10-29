@@ -23,13 +23,23 @@ val KEYWORDS = listOf(
     "정지윤", "지윤"
 )
 
+// 단어 인식 공통 모양 (워치 자체 인식 / 폰에게 맡기기 둘 다 이 모양)
+interface WordListener {
+    val heardWord: String?
+    val info: String
+    fun start()
+    fun feed(chunk: ShortArray)
+    fun clearHeard()
+    fun stop()
+}
+
 // ───────── 단어 인식 (기기 안 음성인식, 인터넷 사용 안 함) ─────────
 // 2단계 마이크 소리를 그대로 받아서 글자로 바꾸고, KEYWORDS 가 들리면 알려줌
-class KeywordSpotter(private val context: Context) {
+class KeywordSpotter(private val context: Context) : WordListener {
 
-    @Volatile var heardWord: String? = null      // 들린 단어 (없으면 null)
+    @Volatile override var heardWord: String? = null      // 들린 단어 (없으면 null)
         private set
-    @Volatile var info: String = ""              // 화면 표시용 상태
+    @Volatile override var info: String = ""              // 화면 표시용 상태
         private set
 
     @Volatile private var running = false
@@ -51,7 +61,7 @@ class KeywordSpotter(private val context: Context) {
     }
 
     // ※ 메인 스레드에서 호출
-    fun start() {
+    override fun start() {
         if (!supported(context)) {
             info = "단어 인식: 이 기기 미지원"
             return
@@ -74,7 +84,7 @@ class KeywordSpotter(private val context: Context) {
     }
 
     // 마이크에서 받은 0.1초 소리를 넘겨줌 (꽉 차면 그냥 버림)
-    fun feed(chunk: ShortArray) {
+    override fun feed(chunk: ShortArray) {
         if (!running) return
         val bytes = ByteArray(chunk.size * 2)
         for (i in chunk.indices) {
@@ -85,12 +95,12 @@ class KeywordSpotter(private val context: Context) {
         queue.offer(bytes)
     }
 
-    fun clearHeard() {
+    override fun clearHeard() {
         heardWord = null
     }
 
     // ※ 메인 스레드에서 호출
-    fun stop() {
+    override fun stop() {
         running = false
         writerThread?.interrupt()
         writerThread = null

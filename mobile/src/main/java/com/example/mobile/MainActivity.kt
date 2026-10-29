@@ -1,8 +1,9 @@
-package com.example.mobile  // ← 자동으로 만들어진 원래 파일의 package 줄로 바꾸세요
+package com.example.mobile
 
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -25,6 +26,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.border
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
@@ -35,6 +40,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // 워치 앱과 같은 단어 목록
 val KEYWORDS = listOf(
@@ -42,7 +51,7 @@ val KEYWORDS = listOf(
     "정지윤", "지윤"
 )
 
-// ───────── S26 에서 "기기 안 한국어 음성인식"이 되는지 확인하는 테스트 앱 ─────────
+// ───────── 폰 앱: 워치 녹음 백업·보호자 알림 설정 + 한국어 인식 테스트 ─────────
 class MainActivity : ComponentActivity() {
 
     private val support = mutableStateOf("확인 전")      // 지원 여부
@@ -50,6 +59,12 @@ class MainActivity : ComponentActivity() {
     private val hit = mutableStateOf("")                 // 감지된 단어
     private val listening = mutableStateOf(false)
     private var recognizer: SpeechRecognizer? = null
+
+    private val guardian = mutableStateOf("")            // 보호자 번호
+    private val autoSms = mutableStateOf(false)          // 녹음 시작 시 보호자 자동 문자
+    private val backups = mutableStateOf(listOf<BackupInfo>())
+    private val playing = mutableStateOf<String?>(null)
+    private var player: MediaPlayer? = null
 
     private fun koreanIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -60,7 +75,49 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         checkSupport()
+        guardian.value = Settings.guardian(this)
+        autoSms.value = Settings.autoSms(this)
         setContent { Screen() }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        backups.value = Backup.list(this)   // 앱 화면 볼 때마다 새 백업 반영
+    }
+
+    // 필요한 권한 한 번에 요청 (알림, 마이크, 문자, 위치)
+    private fun askPermissions() {
+        requestPermissions(arrayOf(
+            Manifest.permission.POST_NOTIFICATIONS,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ), 2)
+    }
+
+    // 앱이 꺼져 있을 때도 위치를 쓰려면 "항상 허용"이 따로 필요 (위치 권한을 먼저 받은 뒤에만 요청 가능)
+    private fun askBackgroundLocation() {
+        requestPermissions(arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION), 3)
+    }
+
+    private fun play(name: String) {
+        stopPlay()
+        try {
+            player = MediaPlayer().apply {
+                setDataSource(File(Backup.dir(this@MainActivity), "$name.wav").absolutePath)
+                setOnCompletionListener { stopPlay() }
+                prepare()
+                start()
+            }
+            playing.value = name
+        } catch (e: Exception) { stopPlay() }
+    }
+
+    private fun stopPlay() {
+        player?.release()
+        player = null
+        playing.value = null
     }
 
     @androidx.compose.runtime.Composable
@@ -74,7 +131,55 @@ class MainActivity : ComponentActivity() {
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Spacer(Modifier.height(30.dp))
-            Txt("기기 안 한국어 음성인식 테스트", 20, Color.White, bold = true)
+            Txt("Gallio 폰", 24, Color.White, bold = true)
+
+            // ── 보호자 알림 설정 ──
+            Txt("보호자 알림", 18, Color.White, bold = true)
+            Btn("① 권한 받기 (알림·문자·위치·마이크)", Color(0xFF424242)) { askPermissions() }
+            Btn("② 위치 '항상 허용' (앱 꺼져 있을 때도 위치 전송)", Color(0xFF424242)) { askBackgroundLocation() }
+            Txt("보호자 번호", 14, Color(0xFF9E9E9E))
+            BasicTextField(
+                value = guardian.value,
+                onValueChange = {
+                    guardian.value = it.filter { c -> c.isDigit() }
+                    Settings.setGuardian(this@MainActivity, guardian.value)
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.dp, Color(0xFF616161), RoundedCornerShape(10.dp))
+                    .padding(12.dp)
+            )
+            Btn(
+                if (autoSms.value) "✅ 녹음 시작되면 보호자에게 위치 문자 보내기: 켜짐"
+                else "⬜ 녹음 시작되면 보호자에게 위치 문자 보내기: 꺼짐",
+                if (autoSms.value) Color(0xFF2E7D32) else Color(0xFF424242)
+            ) {
+                autoSms.value = !autoSms.value
+                Settings.setAutoSms(this@MainActivity, autoSms.value)
+            }
+            Txt("※ 오작동일 수도 있다는 문구가 함께 가요. 원할 때만 켜세요.", 12, Color(0xFF757575))
+
+            // ── 백업된 녹음 ──
+            Spacer(Modifier.height(10.dp))
+            Txt("워치에서 백업된 녹음 ${backups.value.size}개", 18, Color.White, bold = true)
+            if (backups.value.isEmpty()) Txt("아직 없어요", 14, Color(0xFF9E9E9E))
+            backups.value.forEach { b ->
+                val time = SimpleDateFormat("M/d HH:mm:ss", Locale.KOREA).format(Date(b.start))
+                Btn(
+                    (if (playing.value == b.name) "■ " else "▶ ") +
+                            "$time · ${b.trigger} · ${b.durationSec}초" + if (b.verified) " · 원본✓" else "",
+                    Color(0xFF263238)
+                ) {
+                    if (playing.value == b.name) stopPlay() else play(b.name)
+                }
+            }
+
+            // ── 한국어 인식 테스트 ──
+            Spacer(Modifier.height(10.dp))
+            Txt("기기 안 한국어 음성인식 테스트", 18, Color.White, bold = true)
             Txt(support.value, 15, Color(0xFFFFCC80))
 
             Btn(if (listening.value) "■ 듣기 멈춤" else "🎤 듣기 시작", Color(0xFF1565C0)) {
@@ -195,6 +300,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         stopListening()
+        stopPlay()
         super.onDestroy()
     }
 }
