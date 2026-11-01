@@ -3,7 +3,7 @@
 > 매장 CCTV는 소리를 남기지 못합니다.
 > Gallio는 손님을 응대하는 근무자가 갤럭시 워치에서 **근무 시작**만 누르면, 말·목소리·심박을 함께 보고 **폭언이 시작될 때만 자동으로 녹음**하는 앱입니다.
 
-- 시연 영상: https://www.youtube.com/shorts/BbJxchGW01U https://www.youtube.com/shorts/qNGmVTSTdOU
+- 시연 영상: https://www.youtube.com/shorts/BbJxchGW01U (정상적인상황) https://www.youtube.com/shorts/qNGmVTSTdOU (진상을 만난상황)
 
 ---
 
