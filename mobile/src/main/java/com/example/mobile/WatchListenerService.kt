@@ -38,7 +38,6 @@ import java.util.Locale
 // 워치 앱(PhoneLink)과 같은 경로 이름
 const val PATH_ALERT = "/gallio/alert"
 const val PATH_AUDIO = "/gallio/audio"
-const val PATH_KEYWORD = "/gallio/keyword"
 const val PATH_TEXT = "/gallio/text"
 const val PATH_REC = "/gallio/rec/"
 
@@ -110,7 +109,7 @@ class WatchListenerService : WearableListenerService() {
         }
     }
 
-    // ── 3. 워치 소리를 받아서 한국어로 알아듣기 → 욕설·이름이면 워치에 알려줌 ──
+    // ── 3. 워치 소리를 받아서 한국어로 알아듣기 → 문장을 워치에 돌려줌 ──
     override fun onChannelOpened(channel: ChannelClient.Channel) {
         if (channel.path != PATH_AUDIO) return
         val channels = Wearable.getChannelClient(this)
@@ -121,17 +120,12 @@ class WatchListenerService : WearableListenerService() {
         val pipe = ParcelFileDescriptor.createPipe()
         val toRecognizer = ParcelFileDescriptor.AutoCloseOutputStream(pipe[1])
         var recognizer: SpeechRecognizer? = null
-        var lastSent: String? = null
 
-        fun check(b: Bundle?) {
-            val text = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.joinToString(" ") ?: return
-            if (text.isBlank()) return
-            messages.sendMessage(watch, PATH_TEXT, text.takeLast(30).toByteArray())
-            val word = KEYWORDS.firstOrNull { text.replace(" ", "").contains(it) }
-            if (word != null && word != lastSent) {
-                lastSent = word
-                messages.sendMessage(watch, PATH_KEYWORD, word.toByteArray())
-            }
+        // 알아들은 문장을 워치로 보냄 (욕설 횟수는 워치가 셈)
+        fun send(b: Bundle?, isFinal: Boolean) {
+            val text = b?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: ""
+            if (text.isBlank() && !isFinal) return
+            messages.sendMessage(watch, PATH_TEXT, ((if (isFinal) "F|" else "P|") + text).toByteArray())
         }
 
         // 음성인식은 메인 스레드에서 시작해야 함
@@ -139,9 +133,9 @@ class WatchListenerService : WearableListenerService() {
             try {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this).apply {
                     setRecognitionListener(object : RecognitionListener {
-                        override fun onPartialResults(partialResults: Bundle?) = check(partialResults)
-                        override fun onSegmentResults(segmentResults: Bundle) = check(segmentResults)
-                        override fun onResults(results: Bundle?) = check(results)
+                        override fun onPartialResults(partialResults: Bundle?) = send(partialResults, false)
+                        override fun onSegmentResults(segmentResults: Bundle) = send(segmentResults, true)
+                        override fun onResults(results: Bundle?) = send(results, true)
                         override fun onEndOfSegmentedSession() {}
                         override fun onError(error: Int) {}
                         override fun onReadyForSpeech(params: Bundle?) {}

@@ -4,6 +4,10 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
@@ -45,10 +49,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// 워치 앱과 같은 단어 목록
+// 워치 앱과 같은 단어 목록 (테스트 화면용)
 val KEYWORDS = listOf(
-    "시발", "씨발", "시바", "씨바", "병신", "개새끼", "좆", "죽여", "죽을래", "꺼져", "패버",
-    "정지윤", "지윤"
+    "시발", "씨발", "시바", "씨바", "씨팔", "병신", "개새끼", "좆", "지랄", "미친놈", "미친년",
+    "닥쳐", "꺼져", "뒤질", "또라이",
+    "죽여", "죽을래", "죽고싶", "가만안둬", "가만안둔다", "찾아간다", "찾아갈", "패버", "때려", "때릴",
+    "맞고싶", "칼", "신상털"
 )
 
 // ───────── 폰 앱: 워치 녹음 백업·보호자 알림 설정 + 한국어 인식 테스트 ─────────
@@ -64,12 +70,29 @@ class MainActivity : ComponentActivity() {
     private val autoSms = mutableStateOf(false)          // 녹음 시작 시 보호자 자동 문자
     private val backups = mutableStateOf(listOf<BackupInfo>())
     private val playing = mutableStateOf<String?>(null)
+    private val keepLink = mutableStateOf(true)          // 워치 연결 유지
+    private val linkText = mutableStateOf("")            // 연결 상태 표시
+    private val batteryOk = mutableStateOf(false)        // 배터리 "제한 없음" 여부
+    private val ticker = Handler(Looper.getMainLooper())
+    private val tick = object : Runnable {
+        override fun run() {
+            val ago = (System.currentTimeMillis() - LinkState.lastTime) / 1000
+            linkText.value = when {
+                LinkState.relays > 0 && ago <= 3 -> "✅ 워치 소리 받는 중"
+                LinkState.relays > 0 -> "🟡 연결됨 · 소리 기다리는 중"
+                else -> "⚪ 대기 중 (워치에서 근무 시작을 누르면 연결돼요)"
+            } + if (LinkState.lastText.isNotEmpty()) "\n들은 말: " + LinkState.lastText.takeLast(30) else ""
+            ticker.postDelayed(this, 1000)
+        }
+    }
     private var player: MediaPlayer? = null
 
     private fun koreanIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,12 +100,33 @@ class MainActivity : ComponentActivity() {
         checkSupport()
         guardian.value = Settings.guardian(this)
         autoSms.value = Settings.autoSms(this)
+        keepLink.value = Settings.keepLink(this)
+        if (keepLink.value) KeepAliveService.start(this)   // 앱을 열 때 연결 유지 켜기
         setContent { Screen() }
     }
 
     override fun onResume() {
         super.onResume()
         backups.value = Backup.list(this)   // 앱 화면 볼 때마다 새 백업 반영
+        batteryOk.value = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+        ticker.post(tick)
+    }
+
+    override fun onPause() {
+        ticker.removeCallbacks(tick)
+        super.onPause()
+    }
+
+    // 배터리 "제한 없음" 요청 창 (삼성이 앱을 재우지 않게)
+    private fun askBattery() {
+        try {
+            startActivity(
+                Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(Uri.parse("package:$packageName"))
+            )
+        } catch (e: Exception) {
+            startActivity(Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+        }
     }
 
     // 필요한 권한 한 번에 요청 (알림, 마이크, 문자, 위치)
@@ -132,6 +176,22 @@ class MainActivity : ComponentActivity() {
         ) {
             Spacer(Modifier.height(30.dp))
             Txt("Gallio 폰", 24, Color.White, bold = true)
+
+            // ── 워치 연결 ──
+            Txt("워치 연결", 18, Color.White, bold = true)
+            Txt(linkText.value, 15, Color(0xFF90CAF9))
+            Btn(
+                if (keepLink.value) "✅ 연결 유지: 켜짐 (근무 중엔 켜두세요)" else "⬜ 연결 유지: 꺼짐",
+                if (keepLink.value) Color(0xFF1565C0) else Color(0xFF424242)
+            ) {
+                keepLink.value = !keepLink.value
+                Settings.setKeepLink(this@MainActivity, keepLink.value)
+                if (keepLink.value) KeepAliveService.start(this@MainActivity) else KeepAliveService.stop(this@MainActivity)
+            }
+            Btn(
+                if (batteryOk.value) "✅ 배터리 제한 없음 (앱이 잠들지 않아요)" else "⚠ 배터리 제한 풀기 (눌러서 '허용')",
+                if (batteryOk.value) Color(0xFF2E7D32) else Color(0xFFB26A00)
+            ) { askBattery() }
 
             // ── 보호자 알림 설정 ──
             Txt("보호자 알림", 18, Color.White, bold = true)

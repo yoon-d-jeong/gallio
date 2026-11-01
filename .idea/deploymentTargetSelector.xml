@@ -4,10 +4,10 @@
     <selectionStates>
       <SelectionState runConfigName="app">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-10-29T13:09:08.061371600Z">
+        <DropdownSelection timestamp="2026-10-31T07:42:48.766044300Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=C:\Android\AVD\Wear_OS_Large_Round.avd" />
+              <DeviceId pluginId="Wireless" identifier="serviceName=adb-RFAY503WPGX-aLbmey (2)" />
             </handle>
           </Target>
         </DropdownSelection>
@@ -15,10 +15,10 @@
       </SelectionState>
       <SelectionState runConfigName="mobile">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-10-29T13:09:01.239889100Z">
+        <DropdownSelection timestamp="2026-10-31T07:52:48.241426700Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=C:\Android\AVD\Wear_OS_Large_Round.avd" />
+              <DeviceId pluginId="PhysicalDevice" identifier="serial=R5KL30AB5YJ" />
             </handle>
           </Target>
         </DropdownSelection>

@@ -34,11 +34,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -54,53 +50,75 @@ import kotlin.math.log10
 import kotlin.math.sqrt
 
 // ───────── 설정값 (실험하면서 바꿀 숫자들) ─────────
-// [1단계] 움직임
-const val MOTION_SAMPLES = 50        // 최근 몇 개의 가속도 값으로 판단할지 (약 1초 분량)
-const val MOTION_LIMIT = 3.0         // 흔들림이 이 값보다 크면 "격한 움직임"
+// [가중치] 네 가지를 각각 0~1 점수로 만든 뒤 이 비율로 합침 (합이 1)
+const val W_WORD = 0.65              // 언어 65% (욕설·위협 단어 목록 + 문장 AI 중 높은 쪽)
+const val W_SHOUT = 0.10             // 고함 10%
+const val W_SUSTAIN = 0.05           // 지속성 5% (한 번 소리친 것 vs 계속 몰아붙이는 것)
+const val W_HEART = 0.20             // 심박 20% (착용자가 실제로 긴장했는지)
 
-// [1단계] 심박
-const val HR_JUMP_BPM = 20           // HR_JUMP_SECONDS 초 안에 이만큼 오르면 "심박 급상승"
-const val HR_JUMP_SECONDS = 10       //   (러닝처럼 서서히 오르는 건 무시하기 위해 "짧은 시간" 기준)
+const val RECORD_SCORE = 0.6         // 위험 점수가 이 이상이면 녹음 시작 (0~1)
+const val RECORD_HOLD_CHUNKS = 10    // 그 상태가 1초 이상 이어져야 시작 (순간 튀는 값 무시)
+const val STOP_SCORE = 0.25          // 녹음 중 점수가 이 아래로 QUIET_STOP_SECONDS 동안 있으면 멈춤
+const val HOLD_SECONDS = 3           // 고함·심박의 높은 값을 몇 초 동안 기억할지
 
-const val SKIP_STAGE1 = false        // true 로 바꾸면 1단계 없이 바로 소리 감시 (소리만 테스트할 때)
-const val COOLDOWN_SECONDS = 30      // 2단계에서 아무 일 없었으면 이 시간 동안 1단계 쉬기 (운동 중 반복 방지)
+// [욕설·위협] 최근 WORD_WINDOW_SECONDS 초 동안 들린 횟수로 점수
+const val WORD_WINDOW_SECONDS = 30
+val SWEAR_SCORE = listOf(0.0, 0.72, 1.0)      // 욕·막말 0번, 1번(47점: 고함·심박이 조금 더해지면 녹음), 2번 이상(65점: 바로 녹음)
+val THREAT_SCORE = listOf(0.0, 0.75, 1.0)      // 위협 0번, 1번(49점), 2번 이상(65점)
+const val SWEAR_AND_THREAT_BONUS = 0.3         // 욕 + 위협이 같이 나오면 추가 점수
+const val WARN_SCORE = 0.5                      // 불만·짜증 말 ("눈 없어?") → 언어 32점 = "주의"까지만
 
-// [2단계] 소리
-const val MIC_WINDOW_SECONDS = 15    // 1단계 통과 후 마이크를 몇 초 동안 켤지
+// [문장 AI] 욕이 없어도 "알바 주제에 어디서", "사장 나와" 같은 공격적인 말을 문장 전체로 판단
+const val USE_TEXT_AI = true                    // false 면 단어 목록만 사용
+val TEXT_COUNT_SCORE = listOf(0.0, 0.85, 1.0, 1.0)   // 공격적인 문장 0, 1, 2개 이상
+const val TEXT_SCORE_MAX = 0.5                         // 문장 AI만으로는 "주의"(32점)까지. 녹음은 욕·막말·위협 단어나 고함·심박이 더해져야
+const val TEXT_AI_THRESHOLD = 0.4                     // AI 확률이 이 이상이면 공격적인 문장 (평범한 주문 문장은 0.1 이하)
+
+// [고함] 주변보다 얼마나 커졌나 + AI 고함 점수
 const val SAMPLE_RATE = 16000        // 1초에 소리를 16,000번 측정
-const val SHOUT_DB = -20.0           // 최소 기준: 이 값보다 커야 고함 후보
-const val SHOUT_RISE_DB = 15.0       // 그리고 주변 소음보다 이만큼 더 커야 고함 (헬스장·클럽 음악 대비)
-const val SHOUT_CHUNKS = 10          // (AI 없을 때) 큰 소리가 0.1초 x 10 = 1초 이상 이어지면 "고함"
+const val SOUND_MIN_DB = -40.0       // 이보다 작은 소리는 0점
+const val SOUND_FULL_RISE_DB = 20.0  // 주변 소음보다 이만큼 커지면 크기 점수 1점
+const val USE_AI = true              // false 면 AI 없이 크기 점수만 사용
 
-// [2단계] AI 소리 분류 (YAMNet)
-const val USE_AI = true              // false 로 바꾸면 소리 크기만으로 판단 (예전 방식)
-const val AI_SHOUT_SCORE = 0.3f      // "고함류" 점수가 이 값 이상이면 AI가 고함이라고 판단 (0~1)
-const val AI_LOUD_CHUNKS = 3         // AI 판단 + 큰 소리가 0.3초 이상이면 고함 (멀리서 들리는 TV 고함 제외)
+// [지속성] 최근 SUSTAIN_WINDOW_SECONDS 초 중 "거친 소리"였던 비율. SUSTAIN_FULL 이상이면 1점
+const val SUSTAIN_WINDOW_SECONDS = 30
+const val SUSTAIN_FULL = 0.5         // 30초 중 50%(15초) 이상 거칠어야 만점 (잠깐 큰 소리는 거의 0점)
+
+// [심박] 최근 HR_JUMP_SECONDS 초 동안 HR_FULL_RISE 만큼 오르면 1점
+const val HR_JUMP_SECONDS = 10       // (일하면서 서서히 오르는 건 점수가 거의 안 나옴)
+const val HR_FULL_RISE = 25.0
 
 // [녹음]
-const val PRE_SECONDS = 5            // 고함 감지 "이전" 몇 초까지 같이 저장할지
-const val QUIET_STOP_SECONDS = 10    // 조용한 상태가 몇 초 이어지면 녹음을 멈출지
+const val PRE_SECONDS = 5            // 감지 "이전" 몇 초까지 같이 저장할지
+const val QUIET_STOP_SECONDS = 10    // 점수가 낮은 상태가 몇 초 이어지면 녹음을 멈출지
 const val MAX_RECORD_SECONDS = 120   // 한 파일 최대 길이 (초)
 const val MANUAL_MIN_SECONDS = 60    // 긴급 녹음 버튼을 누르면 최소 이 시간은 녹음
 const val KEEP_DAYS = 7              // 이 기간이 지난 녹음은 자동 삭제 (사생활 보호)
 
+fun clamp01(v: Double) = v.coerceIn(0.0, 1.0)
+
 // 화면에 보여줄 상태 묶음
 data class AudioStatus(
-    val stage: Int = 0,              // 0: 꺼짐, 1: 움직임·심박 감시, 2: 소리 확인
-    val trigger: String = "",        // 2단계로 넘어간 이유: "움직임" / "심박" / "수동"
-    val cooldownLeft: Int = 0,       // 쉬는 중이면 남은 초
-    val motion: Double = 0.0,        // 현재 흔들림 정도
+    val score: Double = 0.0,         // 최종 위험 점수 (0~1)
+    val wordScore: Double = 0.0,     // 언어 점수 (단어 목록·문장 AI 중 높은 쪽)
+    val textCount: Int = 0,          // 최근 30초 AI가 공격적이라고 본 문장 수
+    val lastAiProb: Double = -1.0,   // 마지막으로 들은 문장의 AI 공격 확률 (-1 = 아직 없음)
+    val shoutScore: Double = 0.0,    // 고함 점수
+    val sustainScore: Double = 0.0,  // 지속성 점수
+    val heartScore: Double = 0.0,    // 심박 점수
+    val swearCount: Int = 0,         // 최근 30초 욕 횟수
+    val threatCount: Int = 0,        // 최근 30초 위협 횟수
+    val warnCount: Int = 0,          // 최근 30초 불만·짜증 말 횟수
     val heartRate: Int = 0,          // 현재 심박
     val hrRise: Int = 0,             // 최근 HR_JUMP_SECONDS 초 동안 오른 심박
-    val micSecondsLeft: Int = 0,     // 2단계에서 마이크가 꺼지기까지 남은 초
     val db: Double = -90.0,          // 현재 소리 크기
     val ambientDb: Double = -90.0,   // 주변 소음 크기
-    val shouting: Boolean = false,
-    val recording: Boolean = false,
-    val savedCount: Int = 0,
     val aiLabel: String = "",        // AI가 들은 소리 중 1위 (예: "말소리 82%")
     val aiShout: Float = 0f,         // AI가 판단한 "고함류" 점수 (0~1)
-    val keywordInfo: String = ""     // 단어 인식 상태 (예: "단어 인식: 켜짐", "들림: ...")
+    val keywordInfo: String = "",    // 단어 인식 상태
+    val recording: Boolean = false,
+    val manual: Boolean = false,     // 긴급 버튼으로 시작한 녹음인지
+    val savedCount: Int = 0
 )
 
 // 서비스(뒤에서 일하는 쪽)와 화면이 같이 보는 "게시판"
@@ -123,7 +141,6 @@ class RecordingService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var job: Job? = null
-    private var motion: MotionDetector? = null
     private var heart: HeartRateDetector? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -136,35 +153,16 @@ class RecordingService : Service() {
         if (job == null) {
             RecordingStore.deleteOld(applicationContext)
 
-            val m = MotionDetector(applicationContext)
             val h = HeartRateDetector(applicationContext)
-            motion = m
             heart = h
             AudioState.running.value = true
-            AudioState.status.value = AudioStatus(stage = 1, savedCount = RecordingStore.count(applicationContext))
+            AudioState.status.value = AudioStatus(savedCount = RecordingStore.count(applicationContext))
 
             job = scope.launch {
-                m.start()
                 h.start()
                 try {
-                    while (isActive) {
-                        // ── 1단계: 마이크 꺼둔 채 움직임·심박만 감시 ──
-                        AudioState.status.update { it.copy(stage = 1, trigger = "") }
-                        val reason = if (SKIP_STAGE1) "테스트" else waitForTrigger(m, h)
-                        val manual = reason == "수동"
-                        if (manual) AudioState.manualRequest.value = false
-
-                        // ── 2단계: 마이크를 잠깐 켜고 소리 확인 (고함이면 녹음) ──
-                        AudioState.status.update { it.copy(stage = 2, trigger = reason) }
-                        val recorded = listenWindow(applicationContext, startRecordingNow = manual, stageReason = reason)
-
-                        // 끝나면 기록 초기화. 아무 일 없었으면 잠깐 쉬기 (운동 중 반복 방지)
-                        m.reset()
-                        h.reset()
-                        if (!recorded && !SKIP_STAGE1) cooldown()
-                    }
+                    watchLoop(applicationContext)   // 근무 모드가 꺼질 때까지 계속
                 } finally {
-                    m.stop()
                     h.stop()
                 }
             }
@@ -172,38 +170,16 @@ class RecordingService : Service() {
         return START_NOT_STICKY
     }
 
-    // 움직임 "또는" 심박 급상승 "또는" 긴급 버튼 중 하나라도 생길 때까지 기다림
-    private suspend fun waitForTrigger(m: MotionDetector, h: HeartRateDetector): String =
-        combine(m.shaking, h.jump, AudioState.manualRequest) { shake, jump, manual ->
-            when {
-                manual -> "수동"
-                shake -> "움직임"
-                jump -> "심박"
-                else -> null
-            }
-        }.filterNotNull().first()
-
-    private suspend fun cooldown() {
-        for (left in COOLDOWN_SECONDS downTo 1) {
-            if (AudioState.manualRequest.value) break   // 긴급 버튼은 쉬는 중에도 바로 동작
-            AudioState.status.update { it.copy(stage = 1, cooldownLeft = left) }
-            delay(1000)
-        }
-        AudioState.status.update { it.copy(cooldownLeft = 0) }
-    }
-
     override fun onDestroy() {
         job?.cancel()
         job = null
-        motion?.stop()
         heart?.stop()
-        motion = null
         heart = null
         scope.cancel()
         AudioState.running.value = false
         AudioState.manualRequest.value = false
         AudioState.status.update {
-            AudioStatus(savedCount = it.savedCount)
+            AudioStatus(savedCount = RecordingStore.count(applicationContext))
         }
         super.onDestroy()
     }
@@ -211,7 +187,7 @@ class RecordingService : Service() {
     private fun startInForeground() {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "외출 모드", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL_ID, "근무 모드", NotificationManager.IMPORTANCE_LOW)
         )
 
         // 알림을 누르면 앱 화면 열기
@@ -220,7 +196,7 @@ class RecordingService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("외출 모드 켜짐")
+            .setContentTitle("근무 모드 켜짐")
             .setContentText("위험 상황을 감지하고 있어요")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setOngoing(true)
@@ -247,69 +223,11 @@ class RecordingService : Service() {
     }
 }
 
-// ───────── [1단계] 가속도로 격한 움직임 감지 ─────────
-class MotionDetector(context: Context) : SensorEventListener {
-    private val sensorManager: SensorManager? = context.getSystemService(SensorManager::class.java)
-    private val window = ArrayDeque<FloatArray>()   // 최근 가속도 값들
-    val shaking = MutableStateFlow(false)           // 지금 격하게 움직이는 중인지
-
-    fun start() {
-        val sm = sensorManager ?: return
-        val accelerometer = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
-        sm.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)   // 초당 약 50번
-    }
-
-    fun stop() {
-        sensorManager?.unregisterListener(this)
-    }
-
-    fun reset() {
-        synchronized(window) { window.clear() }
-        shaking.value = false
-    }
-
-    override fun onSensorChanged(event: SensorEvent) {
-        var level = 0.0
-        synchronized(window) {
-            window.addLast(floatArrayOf(event.values[0], event.values[1], event.values[2]))
-            while (window.size > MOTION_SAMPLES) window.removeFirst()
-            if (window.size < MOTION_SAMPLES / 2) return   // 값이 아직 덜 모였으면 판단 보류
-            level = shakeLevel(window)
-        }
-        AudioState.status.update { it.copy(motion = level) }
-        shaking.value = level > MOTION_LIMIT
-    }
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-}
-
-// 흔들림 정도 = x, y, z 값이 평균에서 얼마나 들쭉날쭉한지 (표준편차)
-fun shakeLevel(samples: Collection<FloatArray>): Double {
-    val n = samples.size
-    var mx = 0.0
-    var my = 0.0
-    var mz = 0.0
-    for (s in samples) {
-        mx += s[0]; my += s[1]; mz += s[2]
-    }
-    mx /= n; my /= n; mz /= n
-
-    var sum = 0.0
-    for (s in samples) {
-        val dx = s[0] - mx
-        val dy = s[1] - my
-        val dz = s[2] - mz
-        sum += dx * dx + dy * dy + dz * dz
-    }
-    return sqrt(sum / n)
-}
-
-// ───────── [1단계] 심박 급상승 감지 ─────────
+// ───────── 심박: 최근 몇 초 동안 얼마나 올랐는지 계산 ─────────
 // TODO 워치 오면: 삼성 헬스 센서 SDK 로 바꾸면 더 정확함 (지금은 안드로이드 기본 심박 센서)
 class HeartRateDetector(context: Context) : SensorEventListener {
     private val sensorManager: SensorManager? = context.getSystemService(SensorManager::class.java)
     private val history = ArrayDeque<Pair<Long, Float>>()   // (시각, 심박) 최근 기록
-    val jump = MutableStateFlow(false)                      // 지금 심박이 급상승 중인지
 
     fun start() {
         val sm = sensorManager ?: return
@@ -323,11 +241,6 @@ class HeartRateDetector(context: Context) : SensorEventListener {
 
     fun stop() {
         sensorManager?.unregisterListener(this)
-    }
-
-    fun reset() {
-        synchronized(history) { history.clear() }
-        jump.value = false
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -344,13 +257,12 @@ class HeartRateDetector(context: Context) : SensorEventListener {
             rise = bpm - history.minOf { it.second }   // 최근 몇 초 중 가장 낮았을 때보다 얼마나 올랐나
         }
         AudioState.status.update { it.copy(heartRate = bpm.toInt(), hrRise = rise.toInt()) }
-        jump.value = rise >= HR_JUMP_BPM
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 }
 
-// ───────── [2단계] AI 소리 분류 (YAMNet) ─────────
+// ───────── AI 소리 분류 (YAMNet) ─────────
 // 구글이 공개한 YAMNet 모델: 약 1초 소리를 듣고 521가지 종류(말소리, 고함, 음악, 박수...) 중 무엇인지 점수를 매김
 object SoundAi {
     const val WINDOW = 15600   // YAMNet 은 16kHz 소리 15600개(약 0.975초)를 한 번에 봄
@@ -406,10 +318,10 @@ object SoundAi {
     }
 }
 
-// ───────── [2단계] 마이크를 잠깐 켜서 소리 확인 + 고함이면 녹음 ─────────
-// 반환값: 이번에 녹음을 한 번이라도 했는지
+// ───────── 위험 점수로 판단해서 녹음 ─────────
+// 근무 모드 동안 0.1초마다: 욕설·고함·지속성·심박 점수 → 가중치로 합침 → 기준 넘으면 녹음
 @SuppressLint("MissingPermission")
-suspend fun listenWindow(context: Context, startRecordingNow: Boolean, stageReason: String): Boolean = withContext(Dispatchers.IO) {
+suspend fun watchLoop(context: Context) = withContext(Dispatchers.IO) {
     val chunkSize = SAMPLE_RATE / 10   // 0.1초 분량
     val minBuf = AudioRecord.getMinBufferSize(
         SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -423,12 +335,12 @@ suspend fun listenWindow(context: Context, startRecordingNow: Boolean, stageReas
     )
     if (recorder.state != AudioRecord.STATE_INITIALIZED) {
         recorder.release()
-        return@withContext false
+        return@withContext
     }
 
     var savedCount = RecordingStore.count(context)
 
-    val ai = SoundAi.get(context)               // AI 모델 (없으면 null → 소리 크기로만 판단)
+    val ai = SoundAi.get(context)               // AI 모델 (없으면 null → 크기 점수만)
     val aiBuffer = FloatArray(SoundAi.WINDOW)   // AI 에게 보여줄 최근 약 1초 소리
     var aiFilled = 0
     var aiLabel = ""
@@ -443,13 +355,22 @@ suspend fun listenWindow(context: Context, startRecordingNow: Boolean, stageReas
     val preBuffer = ArrayDeque<ShortArray>()   // 최근 몇 초 소리를 계속 들고 있는 "링 버퍼"
     val recentDb = ArrayDeque<Double>()        // 최근 10초 소리 크기 (주변 소음 계산용)
     var active: ActiveRecording? = null        // 지금 녹음 중인 파일
-    var recordedAny = false
-    var pendingManual = startRecordingNow
-    var loudStreak = 0
-    var quietChunks = 0
+
+    // 고함·심박은 "최근 몇 초 중 높은 값"을 기억 (천천히 줄어듦)
+    val decay = 1.0 / (HOLD_SECONDS * 10)
+    var heldShout = 0.0
+    var heldHeart = 0.0
+    val wordLog = ArrayDeque<Pair<Long, WordHit>>()   // 최근 30초 동안 들린 욕설·위협 (시각, 단어)
+    val textOn = USE_TEXT_AI && TextAbuseModel.load(context)   // 문장 AI (파일 없으면 꺼짐)
+    class Sent(var time: Long, var prob: Double, var text: String)
+    val sentLog = LinkedHashMap<Int, Sent>()           // 최근 30초 동안 들은 문장 (문장 id → 확률)
+    var lastAiProb = -1.0
+    val roughLog = ArrayDeque<Boolean>()              // 최근 30초 동안 0.1초마다 "거친 소리"였는지
+    var roughCount = 0
+    var highChunks = 0                          // 점수가 기준 이상인 상태가 이어진 시간
+    var lowChunks = 0                           // 녹음 중 점수가 낮은 상태가 이어진 시간
     var recordedChunks = 0
-    var minChunks = 0                          // 긴급 녹음이면 최소 녹음 길이
-    var idleChunks = 0                         // 녹음 안 하고 듣기만 한 시간 (0.1초 단위)
+    var minChunks = 0                           // 긴급 녹음이면 최소 녹음 길이
 
     recorder.startRecording()
     try {
@@ -458,133 +379,160 @@ suspend fun listenWindow(context: Context, startRecordingNow: Boolean, stageReas
             val n = recorder.read(buffer, 0, chunkSize)
             if (n <= 0) continue
             val chunk = buffer.copyOf(n)
+            val now = AudioState.status.value
 
-            // 긴급 버튼이 2단계 도중에 눌렸는지
-            if (AudioState.manualRequest.value) {
-                AudioState.manualRequest.value = false
-                pendingManual = true
-            }
-
-            // 주변 소음 = 최근 10초 소리 중 조용한 쪽(하위 20%) 크기
+            // ── 소리 크기 ──
             val db = calcDb(chunk)
             recentDb.addLast(db)
             while (recentDb.size > 100) recentDb.removeFirst()
             val ambient = if (recentDb.size >= 10) recentDb.sorted()[recentDb.size / 5] else -90.0
+            val loudScore = if (db < SOUND_MIN_DB) 0.0 else clamp01((db - ambient) / SOUND_FULL_RISE_DB)
 
-            // 큰 소리 = 최소 기준보다 크고 + 주변보다 갑자기 확 커진 소리
-            val loud = db > SHOUT_DB && (recentDb.size < 10 || db > ambient + SHOUT_RISE_DB)
-            loudStreak = if (loud) loudStreak + 1 else 0
-
-            // AI: 최근 약 1초 소리를 0.5초마다 들려주고 "무슨 소리인지" 물어봄
+            // ── AI: 소리가 어느 정도 클 때만 0.5초마다 판단 (배터리 절약) ──
             if (ai != null) {
                 val shift = chunk.size.coerceAtMost(SoundAi.WINDOW)
                 System.arraycopy(aiBuffer, shift, aiBuffer, 0, SoundAi.WINDOW - shift)
                 for (i in 0 until shift) aiBuffer[SoundAi.WINDOW - shift + i] = chunk[chunk.size - shift + i] / 32768f
                 aiFilled = minOf(SoundAi.WINDOW, aiFilled + shift)
                 chunkIndex++
+                val worthChecking = db >= SOUND_MIN_DB && db > ambient + 6
                 if (aiFilled == SoundAi.WINDOW && chunkIndex % 5 == 0) {
-                    try {
-                        val (label, score) = SoundAi.classify(ai, aiBuffer.copyOf())
-                        aiLabel = label
-                        aiShout = score
-                    } catch (e: Exception) { /* 한 번 실패해도 계속 진행 */ }
+                    if (worthChecking) {
+                        try {
+                            val (label, score) = SoundAi.classify(ai, aiBuffer.copyOf())
+                            aiLabel = label
+                            aiShout = score
+                        } catch (e: Exception) { /* 한 번 실패해도 계속 */ }
+                    } else {
+                        aiLabel = "조용함"
+                        aiShout = 0f
+                    }
                 }
             }
 
-            // 단어 인식에도 같은 소리를 넘겨줌 (마이크를 두 번 켜지 않기 위해)
+            // ── ① 욕설·위협: 최근 30초 동안 몇 번 들렸나 ──
             spotter.feed(chunk)
-            val word = spotter.heardWord   // 욕설이나 이름이 들렸으면 그 단어
+            val nowMs = System.currentTimeMillis()
+            spotter.takeHits().forEach { wordLog.addLast(nowMs to it) }
+            while (wordLog.isNotEmpty() && nowMs - wordLog.first().first > WORD_WINDOW_SECONDS * 1000L) wordLog.removeFirst()
+            val swearCount = wordLog.count { !it.second.threat && !it.second.warn }
+            val warnCount = wordLog.count { it.second.warn }
+            val warnPart = if (warnCount > 0) WARN_SCORE else 0.0
+            val threatCount = wordLog.count { it.second.threat }
+            val swearPart = SWEAR_SCORE[swearCount.coerceAtMost(SWEAR_SCORE.size - 1)]
+            val threatPart = THREAT_SCORE[threatCount.coerceAtMost(THREAT_SCORE.size - 1)]
+            val bonus = if (swearCount > 0 && threatCount > 0) SWEAR_AND_THREAT_BONUS else 0.0
+            val listScore = clamp01(maxOf(swearPart, threatPart, warnPart) + bonus)
 
-            // 고함 판단
-            //  - AI 있음: AI가 "고함/비명"이라고 하고 + 실제로 큰 소리가 0.3초 이상
-            //  - AI 없음: 큰 소리가 1초 이상 (예전 방식)
-            val aiOrLoud = if (ai != null) aiShout >= AI_SHOUT_SCORE && loudStreak >= AI_LOUD_CHUNKS
-            else loudStreak >= SHOUT_CHUNKS
-            // 최종: 고함 "또는" 욕설·이름이 들리면 위험
-            val shouting = aiOrLoud || word != null
+            // ── ①-2 문장 AI: 들은 문장마다 공격 확률 계산 ──
+            spotter.takeSentences().forEach { h ->
+                val p = if (textOn) TextAbuseModel.score(h.text) else 0.0
+                lastAiProb = if (textOn) p else -1.0
+                val e = sentLog[h.id]
+                if (e == null) sentLog[h.id] = Sent(nowMs, p, h.text)
+                else {
+                    e.time = nowMs
+                    if (p >= e.prob) { e.prob = p; e.text = h.text }   // 같은 문장은 가장 높게 나온 값 기억
+                }
+            }
+            sentLog.entries.removeAll { nowMs - it.value.time > WORD_WINDOW_SECONDS * 1000L }
+            val aggressive = sentLog.values.filter { it.prob >= TEXT_AI_THRESHOLD }
+            val textCount = aggressive.size
+            val worst = aggressive.maxByOrNull { it.prob }
+            val textScore = if (worst == null) 0.0
+            else TEXT_SCORE_MAX * (0.6 + 0.4 * worst.prob) * TEXT_COUNT_SCORE[textCount.coerceAtMost(TEXT_COUNT_SCORE.size - 1)]
+
+            // 언어 점수 = 단어 목록과 문장 AI 중 높은 쪽
+            val wordScore = maxOf(listScore, textScore)
+
+            // ── ② 고함: 크기 50% + AI 고함 50% ──
+            val shoutScore = if (ai != null) (loudScore + aiShout) / 2 else loudScore
+            heldShout = maxOf(shoutScore, heldShout - decay)
+
+            // ── ③ 지속성: 최근 30초 중 거친 소리였던 비율 ──
+            val rough = loudScore >= 0.6 || aiShout >= 0.4   // "거친 소리" 기준 (높일수록 덜 민감)
+            roughLog.addLast(rough)
+            if (rough) roughCount++
+            while (roughLog.size > SUSTAIN_WINDOW_SECONDS * 10) if (roughLog.removeFirst()) roughCount--
+            val sustainScore = clamp01(roughCount.toDouble() / (SUSTAIN_WINDOW_SECONDS * 10) / SUSTAIN_FULL)
+
+            // ── ④ 심박: 10초 안에 얼마나 급하게 올랐나 ──
+            val heartScore = clamp01(now.hrRise / HR_FULL_RISE)
+            heldHeart = maxOf(heartScore, heldHeart - decay)
+
+            // ── 최종 위험 점수 ──
+            val score = W_WORD * wordScore + W_SHOUT * heldShout + W_SUSTAIN * sustainScore + W_HEART * heldHeart
+
+            // 긴급 버튼
+            val manualNow = AudioState.manualRequest.value
+            if (manualNow) AudioState.manualRequest.value = false
 
             val a = active
             if (a == null) {
-                idleChunks++
                 // 아직 녹음 전: 최근 PRE_SECONDS 초만 기억
                 preBuffer.addLast(chunk)
                 while (preBuffer.size > PRE_SECONDS * 10) preBuffer.removeFirst()
+                highChunks = if (score >= RECORD_SCORE) highChunks + 1 else 0
 
-                if (shouting || pendingManual) {
+                if (highChunks >= RECORD_HOLD_CHUNKS || manualNow) {
                     // 녹음 시작! 기억해둔 "이전 상황"부터 먼저 파일에 씀
                     val start = System.currentTimeMillis()
                     val name = "rec_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(start))
                     val writer = WavWriter(RecordingStore.wav(context, name), SAMPLE_RATE)
                     preBuffer.forEach { writer.write(it) }
                     preBuffer.clear()
+                    val words = wordLog.groupingBy { it.second.word }.eachCount()
+                        .entries.joinToString(" ") { "${it.key}×${it.value}" }
+                    val reason = if (manualNow) "긴급 버튼" else
+                        "점수 %d (언어 %d·고함 %d·지속 %d·심박 %d)".format(
+                            (score * 100).toInt(), (wordScore * 100).toInt(), (heldShout * 100).toInt(),
+                            (sustainScore * 100).toInt(), (heldHeart * 100).toInt()
+                        ) + (if (words.isNotEmpty()) " $words" else "") +
+                                (worst?.let { " · AI ${textCount}문장 '${it.text.take(20)}' ${(it.prob * 100).toInt()}%" } ?: "")
                     active = ActiveRecording(
-                        writer = writer,
-                        name = name,
-                        start = start,
-                        trigger = when {
-                            pendingManual -> "긴급 버튼"
-                            word != null -> "$stageReason → 단어 '$word'"
-                            ai != null -> "$stageReason → AI 고함"
-                            else -> "$stageReason → 고함"
-                        },
-                        heartRate = AudioState.status.value.heartRate,
-                        maxDb = db
+                        writer = writer, name = name, start = start, trigger = reason,
+                        heartRate = now.heartRate, maxDb = db
                     )
-                    recordedAny = true
-                    quietChunks = 0
+                    lowChunks = 0
                     recordedChunks = 0
-                    minChunks = if (pendingManual) MANUAL_MIN_SECONDS * 10 else 0
-                    pendingManual = false
-                    spotter.clearHeard()
+                    minChunks = if (manualNow) MANUAL_MIN_SECONDS * 10 else 0
                     vibrate(context)
-                    PhoneLink.sendAlert(context, active!!.trigger)   // 폰에 "녹음 시작" 알림
-                } else if (idleChunks >= MIC_WINDOW_SECONDS * 10) {
-                    break   // 고함 없이 시간이 다 됨 → 마이크 끄고 1단계로
+                    PhoneLink.sendAlert(context, reason)   // 폰에 "녹음 시작" 알림
                 }
             } else {
-                if (pendingManual) {   // 녹음 중에 긴급 버튼 → 최소 길이 연장
-                    minChunks = recordedChunks + MANUAL_MIN_SECONDS * 10
-                    pendingManual = false
-                }
-                // 녹음 중: 계속 파일에 쓰고, 오래 조용하거나 너무 길면 멈춤
+                if (manualNow) minChunks = recordedChunks + MANUAL_MIN_SECONDS * 10   // 녹음 중 긴급 버튼 → 연장
+                // 녹음 중: 계속 쓰고, 점수가 오래 낮거나 너무 길면 멈춤
                 a.writer.write(chunk)
                 a.maxDb = maxOf(a.maxDb, db)
                 recordedChunks++
-                // 욕설·이름이 또 들리면 "아직 조용하지 않음"으로 보고 녹음 계속
-                quietChunks = if (loud || word != null) 0 else quietChunks + 1
-                if (word != null) spotter.clearHeard()
-                val quietEnough = quietChunks >= QUIET_STOP_SECONDS * 10 && recordedChunks >= minChunks
-                if (quietEnough || recordedChunks >= MAX_RECORD_SECONDS * 10) {
-                    RecordingStore.finish(context, a)   // 파일 닫기 + 지문 계산 + 정보 저장
+                lowChunks = if (score < STOP_SCORE) lowChunks + 1 else 0
+                val calmEnough = lowChunks >= QUIET_STOP_SECONDS * 10 && recordedChunks >= minChunks
+                if (calmEnough || recordedChunks >= MAX_RECORD_SECONDS * 10) {
+                    RecordingStore.finish(context, a)   // 파일 닫기 + 지문 계산 + 정보 저장 + 폰 백업
                     active = null
                     savedCount++
-                    idleChunks = 0   // 녹음이 끝나면 한 번 더 MIC_WINDOW_SECONDS 초 동안 들어봄
+                    highChunks = 0
                 }
             }
 
-            val left = if (active == null) MIC_WINDOW_SECONDS - idleChunks / 10 else 0
             AudioState.status.update {
                 it.copy(
-                    db = db, ambientDb = ambient, shouting = shouting, recording = active != null,
-                    savedCount = savedCount, micSecondsLeft = left, aiLabel = aiLabel, aiShout = aiShout,
-                    keywordInfo = spotter.info
+                    score = score, wordScore = wordScore, shoutScore = heldShout, sustainScore = sustainScore,
+                    heartScore = heldHeart, swearCount = swearCount, threatCount = threatCount, warnCount = warnCount,
+                    textCount = textCount, lastAiProb = lastAiProb,
+                    db = db, ambientDb = ambient, aiLabel = aiLabel, aiShout = aiShout,
+                    keywordInfo = spotter.info, recording = active != null,
+                    manual = active?.trigger == "긴급 버튼", savedCount = savedCount
                 )
             }
         }
     } finally {
-        // 외출 모드를 끄면 녹음 중이던 파일도 마무리해서 저장
+        // 근무 모드를 끄면 녹음 중이던 파일도 마무리해서 저장
         active?.let { RecordingStore.finish(context, it) }
         recorder.stop()
         recorder.release()
         withContext(NonCancellable + Dispatchers.Main) { spotter.stop() }
-        AudioState.status.update {
-            it.copy(
-                db = -90.0, ambientDb = -90.0, shouting = false, recording = false, micSecondsLeft = 0,
-                savedCount = RecordingStore.count(context), aiLabel = "", aiShout = 0f, keywordInfo = ""
-            )
-        }
     }
-    recordedAny
 }
 
 // 0.1초 분량 소리의 크기(dB) 계산

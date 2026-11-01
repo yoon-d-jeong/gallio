@@ -16,31 +16,116 @@ import java.util.concurrent.LinkedBlockingQueue
 
 // ───────── 감지할 단어 (직접 추가·삭제 가능) ─────────
 // 띄어쓰기는 무시하고 "들린 말에 이 단어가 들어 있는지"로 판단
-val KEYWORDS = listOf(
-    // 욕설·위협
-    "시발", "씨발", "시바", "씨바", "병신", "개새끼", "좆", "죽여", "죽을래", "꺼져", "패버",
-    // 착용자 이름 → "나를 향한 말"이라는 뜻
-    "정지윤", "지윤"
+// 욕설: 기분 나쁜 말 / 위협: 해를 끼치겠다는 말 (더 위험하게 봄)
+val SWEAR_WORDS = listOf(
+    "시발", "씨발", "시바", "씨바", "씨팔", "병신", "개새끼", "좆", "지랄", "미친놈", "미친년",
+    "닥쳐", "꺼져", "뒤질", "또라이",
+    // 받아쓰기가 다르게 적는 경우 + 자주 쓰는 욕
+    "시팔", "씨빨", "십알", "ㅅㅂ", "ㅆㅂ", "병씬", "븅신", "개새", "개색", "새끼야", "좆같", "존나",
+    "엿먹", "니미", "느금", "염병", "썅", "쌍놈", "쌍년", "미친새끼", "미쳤냐", "돌았냐", "등신", "멍청한",
+    "졸라", "**"   // ** = 받아쓰기가 욕을 별표로 가린 경우
 )
+val THREAT_WORDS = listOf(
+    "죽여", "죽을래", "죽고싶", "가만안둬", "가만안둔다", "찾아간다", "찾아갈", "패버", "때려", "때릴",
+    "맞고싶", "칼로", "칼들고", "칼빵", "신상털"   // "칼"만 있으면 칼국수도 잡혀서 뺌
+)
+
+// 막말·갑질: 욕은 아니지만 진상 손님이 자주 하는 말 (욕설과 같은 점수로 셈)
+val JINSANG_WORDS = listOf(
+    "사장나와", "사장나오라", "사장불러", "책임자나와", "몇살이야", "내가누군지", "알바주제", "주제에",
+    "니가뭔데", "너따위", "니까짓", "똑바로안해", "똑바로해", "눈깔", "눈을그렇게", "어디서감히",
+    "무릎꿇", "나무시", "일머리", "알바나하", "알바나하고", "무시하냐", "가르쳤냐", "머리가나쁘", "말귀를", "그따위", "싸가지", "개념없",
+    "잘리고싶", "잘라버", "모가지", "반말하", "뭘봐", "웃기고있네", "장난하냐", "장난해"
+)
+
+// 불만·짜증: 아직 욕은 아니지만 분위기가 험해지는 말 → "주의"까지만 올림 (이것만으로는 녹음 안 함)
+val WARN_WORDS = listOf(
+    "눈없", "눈이없", "눈똑바로", "어떻게들고", "답답하", "짜증나", "왜이렇게느려", "빨리빨리",
+    "제대로좀", "똑바로좀", "일을이렇게", "뭐하는거야", "생각이없", "아이씨", "정신없"
+)
+
+data class WordHit(val word: String, val threat: Boolean, val warn: Boolean = false)
+
+// 알아들은 문장 (문장 AI 가 판단). 같은 문장은 같은 id (말하는 중간 결과 → 최종 결과)
+data class Heard(val id: Int, val text: String, val isFinal: Boolean)
+
+// 문장을 AI 에게 넘길지 정리: 문장이 끝났거나, 말하는 중이라도 6글자 이상 늘었으면 넘김
+class SentenceTracker {
+    private var id = 0
+    private var lastLen = 0
+
+    @Synchronized
+    fun update(text: String, isFinal: Boolean): Heard? {
+        val out = when {
+            text.isBlank() -> null
+            isFinal || text.length - lastLen >= 6 -> Heard(id, text, isFinal)
+            else -> null
+        }
+        if (out != null) lastLen = text.length
+        if (isFinal) { id++; lastLen = 0 }
+        return out
+    }
+}
+
+// 문장 안의 욕설·위협 단어를 "몇 번" 나왔는지 셈 (긴 단어부터 찾고 지워서 겹쳐 세지 않음)
+fun countWords(text: String): Map<WordHit, Int> {
+    var t = text.replace(" ", "")
+    val result = mutableMapOf<WordHit, Int>()
+    val all = (SWEAR_WORDS + JINSANG_WORDS).map { WordHit(it, false) } + THREAT_WORDS.map { WordHit(it, true) } +
+            WARN_WORDS.map { WordHit(it, false, warn = true) }
+    for (w in all.sortedByDescending { it.word.length }) {
+        var count = 0
+        var i = t.indexOf(w.word)
+        while (i >= 0) {
+            count++
+            t = t.substring(0, i) + "#".repeat(w.word.length) + t.substring(i + w.word.length)
+            i = t.indexOf(w.word)
+        }
+        if (count > 0) result[w] = count
+    }
+    return result
+}
+
+// 음성인식은 말하는 도중에 "중간 결과"를 여러 번 보냄 → 같은 욕이 여러 번 세어지지 않게
+// 한 문장 안에서는 "지금까지 센 횟수보다 늘어난 만큼만" 새로 들린 것으로 인정
+class HitCounter {
+    private val seen = mutableMapOf<WordHit, Int>()
+
+    @Synchronized
+    fun update(text: String, isFinal: Boolean): List<WordHit> {
+        val newHits = mutableListOf<WordHit>()
+        for ((w, count) in countWords(text)) {
+            val before = seen[w] ?: 0
+            if (count > before) {
+                repeat(count - before) { newHits.add(w) }
+                seen[w] = count
+            }
+        }
+        if (isFinal) seen.clear()   // 문장이 끝나면 다음 문장은 새로 셈
+        return newHits
+    }
+}
 
 // 단어 인식 공통 모양 (워치 자체 인식 / 폰에게 맡기기 둘 다 이 모양)
 interface WordListener {
-    val heardWord: String?
     val info: String
     fun start()
     fun feed(chunk: ShortArray)
-    fun clearHeard()
+    fun takeHits(): List<WordHit>   // 지난번 이후 새로 들린 욕설·위협 단어
+    fun takeSentences(): List<Heard> // 지난번 이후 새로 알아들은 문장 (문장 AI 용)
     fun stop()
 }
 
 // ───────── 단어 인식 (기기 안 음성인식, 인터넷 사용 안 함) ─────────
-// 2단계 마이크 소리를 그대로 받아서 글자로 바꾸고, KEYWORDS 가 들리면 알려줌
+// 근무 모드 마이크 소리를 그대로 받아서 글자로 바꾸고, 욕설·위협 단어를 셈
 class KeywordSpotter(private val context: Context) : WordListener {
 
-    @Volatile override var heardWord: String? = null      // 들린 단어 (없으면 null)
-        private set
     @Volatile override var info: String = ""              // 화면 표시용 상태
         private set
+    private val counter = HitCounter()
+    private val hits = java.util.concurrent.ConcurrentLinkedQueue<WordHit>()
+    private val tracker = SentenceTracker()
+    private val sentences = java.util.concurrent.ConcurrentLinkedQueue<Heard>()
 
     @Volatile private var running = false
     @Volatile private var out: OutputStream? = null
@@ -95,8 +180,16 @@ class KeywordSpotter(private val context: Context) : WordListener {
         queue.offer(bytes)
     }
 
-    override fun clearHeard() {
-        heardWord = null
+    override fun takeHits(): List<WordHit> {
+        val list = mutableListOf<WordHit>()
+        while (true) list.add(hits.poll() ?: break)
+        return list
+    }
+
+    override fun takeSentences(): List<Heard> {
+        val list = mutableListOf<Heard>()
+        while (true) list.add(sentences.poll() ?: break)
+        return list
     }
 
     // ※ 메인 스레드에서 호출
@@ -152,22 +245,27 @@ class KeywordSpotter(private val context: Context) : WordListener {
         main.postDelayed({ begin() }, 200)
     }
 
-    private fun check(results: Bundle?) {
-        val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
-        val joined = texts.joinToString(" ")
-        if (joined.isBlank()) return
+    private fun check(results: Bundle?, isFinal: Boolean) {
+        // 첫 번째(가장 그럴듯한) 결과만 사용
+        val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
+        if (text.isNullOrBlank()) {
+            if (isFinal) {
+                counter.update("", true)
+                tracker.update("", true)
+            }
+            return
+        }
         errorCount = 0
-        val compact = joined.replace(" ", "")
-        info = "들림: " + joined.takeLast(14)
-        val word = KEYWORDS.firstOrNull { compact.contains(it) }
-        if (word != null) heardWord = word
+        info = "들림: " + text.takeLast(14)
+        hits.addAll(counter.update(text, isFinal))
+        tracker.update(text, isFinal)?.let { sentences.add(it) }
     }
 
     private val listener = object : RecognitionListener {
-        override fun onPartialResults(partialResults: Bundle?) = check(partialResults)
-        override fun onSegmentResults(segmentResults: Bundle) = check(segmentResults)
+        override fun onPartialResults(partialResults: Bundle?) = check(partialResults, false)
+        override fun onSegmentResults(segmentResults: Bundle) = check(segmentResults, true)
         override fun onResults(results: Bundle?) {
-            check(results)
+            check(results, true)
             restart()
         }
         override fun onEndOfSegmentedSession() = restart()
